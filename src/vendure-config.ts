@@ -8,7 +8,6 @@ import { defaultEmailHandlers, EmailPlugin, EmailPluginDevModeOptions, EmailPlug
 import { AssetServerPlugin } from '@vendure/asset-server-plugin';
 import { AdminUiPlugin } from '@vendure/admin-ui-plugin';
 import { StripePlugin } from '@vendure/payments-plugin/package/stripe';
-import { MultivendorPlugin } from './plugins/multivendor-plugin/multivendor.plugin';
 import 'dotenv/config';
 import path from 'path';
 
@@ -88,10 +87,6 @@ export const config: VendureConfig = {
     // need to be updated. See the "Migrations" section in README.md.
     customFields: {},
     plugins: [
-        MultivendorPlugin.init({
-            platformFeePercent: 10,
-            platformFeeSKU: 'FEE',
-        }),
         AssetServerPlugin.init({
             route: 'assets',
             assetUploadDir: process.env.ASSET_VOLUME_PATH || path.join(__dirname, '../static/assets'),
