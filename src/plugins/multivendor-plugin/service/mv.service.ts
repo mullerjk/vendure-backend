@@ -87,7 +87,7 @@ export class MultivendorService {
             translations: [
                 {
                     languageCode: defaultChannel.defaultLanguageCode,
-                    name: `Standard Shipping for ${shopName}`,
+                    name: `Enviado por ${shopName}`,
                 },
             ],
         });
@@ -99,7 +99,7 @@ export class MultivendorService {
 
     private async createSellerStockLocation(ctx: RequestContext, shopName: string, sellerChannel: Channel) {
         const stockLocation = await this.stockLocationService.create(ctx, {
-            name: `${shopName} Warehouse`,
+            name: `Armazem de ${shopName}`,
         });
         await this.channelService.assignToChannels(ctx, StockLocation, stockLocation.id, [sellerChannel.id]);
     }
@@ -122,7 +122,7 @@ export class MultivendorService {
         const channel = await this.channelService.create(ctx, {
             code: shopCode,
             sellerId: seller.id,
-            token: `${shopCode}-token`,
+            token: `${shopCode}`,
             currencyCode: defaultChannel.defaultCurrencyCode,
             defaultLanguageCode: defaultChannel.defaultLanguageCode,
             pricesIncludeTax: defaultChannel.pricesIncludeTax,
@@ -138,7 +138,7 @@ export class MultivendorService {
         const role = await this.roleService.create(ctx, {
             code: `${shopCode}-admin`,
             channelIds: [channel.id],
-            description: `Administrator of ${input.shopName}`,
+            description: `Administrador de ${input.shopName}`,
             permissions: [
                 Permission.CreateCatalog,
                 Permission.UpdateCatalog,

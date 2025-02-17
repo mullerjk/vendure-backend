@@ -19,7 +19,10 @@ import {
     TransactionalConnection,
 } from '@vendure/core';
 
-import { CONNECTED_PAYMENT_METHOD_CODE, MULTIVENDOR_PLUGIN_OPTIONS } from '../constants';
+import {
+    CONNECTED_PAYMENT_METHOD_CODE,
+    MULTIVENDOR_PLUGIN_OPTIONS
+} from '../constants';
 import { MultivendorPluginOptions } from '../types';
 
 declare module '@vendure/core/dist/entity/custom-entity-fields' {
@@ -47,6 +50,10 @@ export class MultivendorSellerStrategy implements OrderSellerStrategy {
         this.options = injector.get(MULTIVENDOR_PLUGIN_OPTIONS);
     }
 
+    /**
+     * Called for each OrderLine as it is added to the Order to determine
+     * the Channel (Seller) that "owns" that variant.
+     */
     async setOrderLineSellerChannel(ctx: RequestContext, orderLine: OrderLine) {
         await this.entityHydrator.hydrate(ctx, orderLine.productVariant, { relations: ['channels'] });
         const defaultChannel = await this.channelService.getDefaultChannel();
@@ -63,8 +70,12 @@ export class MultivendorSellerStrategy implements OrderSellerStrategy {
         }
     }
 
+    /**
+     * Splits the "aggregate" Order into sub-orders based on each Seller's Channel.
+     */
     async splitOrder(ctx: RequestContext, order: Order): Promise<SplitOrderContents[]> {
         const partialOrders = new Map<ID, SplitOrderContents>();
+
         for (const line of order.lines) {
             const sellerChannelId = line.sellerChannelId;
             if (sellerChannelId) {
@@ -82,8 +93,10 @@ export class MultivendorSellerStrategy implements OrderSellerStrategy {
             }
         }
 
+        // Assign shipping lines to each partial order
         for (const partialOrder of partialOrders.values()) {
             const shippingLineIds = new Set(partialOrder.lines.map(l => l.shippingLineId));
+                        
             partialOrder.shippingLines = order.shippingLines.filter(shippingLine =>
                 shippingLineIds.has(shippingLine.id),
             );
@@ -92,7 +105,13 @@ export class MultivendorSellerStrategy implements OrderSellerStrategy {
         return [...partialOrders.values()];
     }
 
+    /**
+     * Called after each Seller sub-order is created.
+     * Here we can add surcharges (e.g. fees) and attach a PaymentMethod,
+     * so each sub-order can process its own Payment if necessary.
+     */
     async afterSellerOrdersCreated(ctx: RequestContext, aggregateOrder: Order, sellerOrders: Order[]) {
+        // Locate the PaymentMethod for connected accounts
         const paymentMethod = await this.connection.rawConnection.getRepository(PaymentMethod).findOne({
             where: {
                 code: CONNECTED_PAYMENT_METHOD_CODE,
@@ -101,7 +120,9 @@ export class MultivendorSellerStrategy implements OrderSellerStrategy {
         if (!paymentMethod) {
             return;
         }
+
         const defaultChannel = await this.channelService.getDefaultChannel();
+
         for (const sellerOrder of sellerOrders) {
             const sellerChannel = sellerOrder.channels.find(c => !idsAreEqual(c.id, defaultChannel.id));
             if (!sellerChannel) {
@@ -109,9 +130,27 @@ export class MultivendorSellerStrategy implements OrderSellerStrategy {
                     `Could not determine Seller Channel for Order ${sellerOrder.code}`,
                 );
             }
-            sellerOrder.surcharges = [await this.createPlatformFeeSurcharge(ctx, sellerOrder)];
+
+            // 1) CREATE SURCHARGES FOR FEES
+            //    We'll create negative surcharges so that the final `sellerOrder.totalWithTax`
+            //    becomes the "net" amount the seller sees for this sub-order.
+
+            const [platformFeeSurcharge, stripeFeeSurcharge] =
+                await this.createPlatformAndStripeFeeSurcharges(ctx, sellerOrder);
+
+            sellerOrder.surcharges = [
+                platformFeeSurcharge,
+                stripeFeeSurcharge,
+            ];
+
+            // 2) Re-apply price adjustments so these surcharges affect the total
             await this.orderService.applyPriceAdjustments(ctx, sellerOrder);
+
+            // 3) Hydrate to get the Seller and connected account info
             await this.entityHydrator.hydrate(ctx, sellerChannel, { relations: ['seller'] });
+
+            // 4) Add a Payment to the sub-order (pointing to the same "connected" PaymentMethod).
+            //    The `metadata` can include the transfer_group or any data we want to track.
             const result = await this.orderService.addPaymentToOrder(ctx, sellerOrder.id, {
                 method: paymentMethod.code,
                 metadata: {
@@ -119,23 +158,58 @@ export class MultivendorSellerStrategy implements OrderSellerStrategy {
                     connectedAccountId: sellerChannel.seller?.customFields.connectedAccountId,
                 },
             });
+
             if (isGraphQlErrorResult(result)) {
                 throw new InternalServerError(result.message);
             }
         }
     }
 
-    private async createPlatformFeeSurcharge(ctx: RequestContext, sellerOrder: Order) {
-        const platformFee = Math.round(sellerOrder.totalWithTax * -(this.options.platformFeePercent / 100));
-        return this.connection.getRepository(ctx, Surcharge).save(
+    /**
+     * Creates negative surcharges for both:
+     *   1) Platform Fee (using this.options.platformFeePercent)
+     *   2) Stripe Fee (example: 3.99% + R$0.39)
+     *
+     * This approach uses negative surcharges to reduce the final Seller total.
+     * Adjust as needed if your logic differs (e.g. if the Seller is not actually paying Stripe fees).
+     */
+    private async createPlatformAndStripeFeeSurcharges(ctx: RequestContext, sellerOrder: Order) {
+        // (A) Calculate the total with tax (in cents).
+        const totalCents = sellerOrder.totalWithTax;
+
+        // (B) Calculate PLATFORM FEE
+        const platformFeePercent = this.options.platformFeePercent; // e.g. 2.99
+        const platformFee = Math.round(totalCents * (platformFeePercent / 100));
+
+        // (C) Calculate STRIPE FEE (e.g. 3.99% + R$0.39)
+        //     *In a real scenario, you might fetch these from your config or environment*
+        const stripeFeePercent = 3.99;
+        const stripeFixedFee = 39; // R$0,39 in cents
+        const stripeFee = Math.round(totalCents * (stripeFeePercent / 100)) + stripeFixedFee;
+
+        // (D) Create negative surcharges
+        const platformFeeSurcharge = await this.connection.getRepository(ctx, Surcharge).save(
             new Surcharge({
                 taxLines: [],
-                sku: this.options.platformFeeSKU,
-                description: 'Platform fee',
-                listPrice: platformFee,
+                sku: this.options.platformFeeSKU, // e.g. 'FEE'
+                description: `Taxa Mercantia (${platformFeePercent}%)`,
+                listPrice: -platformFee, // Negative to reduce seller's total
                 listPriceIncludesTax: true,
                 order: sellerOrder,
             }),
         );
+
+        const stripeFeeSurcharge = await this.connection.getRepository(ctx, Surcharge).save(
+            new Surcharge({
+                taxLines: [],
+                sku: 'SF', 
+                description: `Taxa Stripe (3.99% + R$0.39)`,
+                listPrice: -stripeFee, // Negative
+                listPriceIncludesTax: true,
+                order: sellerOrder,
+            }),
+        );
+
+        return [platformFeeSurcharge, stripeFeeSurcharge];
     }
 }

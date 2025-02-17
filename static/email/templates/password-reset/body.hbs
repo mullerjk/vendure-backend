@@ -1,20 +1,21 @@
-{{> header title="Forgotten password reset" }}
+{{> header title="Resetar senha esquecida" }}
 
 <mj-section background-color="#fafafa">
     <mj-column>
         <mj-text color="#525252">
-            Someone requested a new password for your account.
+            Alguém solicitou uma nova senha para sua conta.
         </mj-text>
 
         <mj-button font-family="Helvetica"
                    background-color="#f45e43"
                    color="white"
                    href="{{ passwordResetUrl }}?token={{ passwordResetToken }}">
-            Reset password
+            Resetar senha
         </mj-button>
 
         <mj-text color="#525252">
-        If you didn't make this request then you can safely ignore this email - nothing has been changed on your account.
+        Se você não solicitou uma nova senha, ignore este e-mail.
+        Nada será alterado em sua conta.
         </mj-text>
 
     </mj-column>

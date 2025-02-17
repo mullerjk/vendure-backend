@@ -1,40 +1,64 @@
+// multivendorPaymentMethodHandler.ts
 import { OrderType } from '@vendure/common/lib/generated-types';
 import {
     CreatePaymentResult,
     LanguageCode,
     PaymentMethodHandler,
-    SettlePaymentErrorResult,
     SettlePaymentResult,
 } from '@vendure/core';
 
-import { MyConnectSdk } from '../payment/mv-connect-sdk';
+import { StripeService } from './stripe.service';
 
-const sdk = new MyConnectSdk({ apiKey: 'MY_API_KEY' });
-
+/**
+ * A custom PaymentMethodHandler that delegates all Stripe calls to `StripeService`.
+ */
 export const multivendorPaymentMethodHandler = new PaymentMethodHandler({
-    code: 'mv-connect-payment-method',
+    code: 'stripe',
     description: [
         {
             languageCode: LanguageCode.en,
-            value: 'Multivendor Payment Provider',
+            value: 'Multivendor Stripe Payment Provider',
         },
     ],
-    args: {},
-    createPayment: async (ctx, order, amount, args, metadata) => {
+    args: {
+        // You can define your ConfigArgs here if needed:
+        // apiKey: { type: 'string', label: [{ languageCode: LanguageCode.en, value: 'API Key' }] },
+        // webhookSecret: { type: 'string', label: [{ languageCode: LanguageCode.en, value: 'Webhook Secret' }] },
+    },
+    /**
+     * createPayment:
+     *  This method is called when the user attempts to complete an Order.
+     */
+    createPayment: async (ctx, order, amount, args, metadata): Promise<CreatePaymentResult> => {
+        // Vendure 2.x => `ctx.injector` is available
+        const stripeService = ctx.injector.get(StripeService);
+
         if (order.type === OrderType.Seller) {
+            // ========== SELLER ORDER ========== //
             try {
-                // Create a Transfer payment to the Seller's account
-                const result = await sdk.createTransfer({
+                // We expect the seller’s connected Stripe Account ID in metadata
+                const { connectedAccountId, transfer_group } = metadata || {};
+                if (!connectedAccountId) {
+                    throw new Error('No "connectedAccountId" found in payment metadata');
+                }
+
+                // Create a Transfer to the Seller’s connected Stripe Account
+                const transfer = await stripeService.createTransfer(ctx, order, {
+                    connectedAccountId,
                     amount,
                     currency: order.currencyCode,
-                    connectedAccountId: metadata.connectedAccountId,
-                    transfer_group: metadata.transfer_group,
+                    transferGroup: transfer_group, // optional
                 });
+
+                // Return "Settled" to indicate immediate capture
                 return {
                     amount,
                     state: 'Settled' as const,
-                    transactionId: result.transactionId,
-                    metadata,
+                    transactionId: transfer.id,
+                    metadata: {
+                        ...metadata,
+                        transfer_group,
+                    },
                 };
             } catch (err: any) {
                 return {
@@ -46,21 +70,23 @@ export const multivendorPaymentMethodHandler = new PaymentMethodHandler({
                 };
             }
         } else {
+            // ========== PLATFORM ORDER ========== //
             try {
-                // Create a payment to the platform's account,
-                // and set the `transfer_group` option to later link
-                // with the Seller transfers after the Seller orders
-                // have been created.
-                const result = await sdk.createPayment({
-                    amount,
-                    currency: order.currencyCode,
-                    transfer_group: order.code,
-                });
+                // Create PaymentIntent for the platform
+                const pi = await stripeService.createPaymentIntentWithId(ctx, order);
+
+                // If you want a 2-step (Authorize + Capture) flow,
+                // you could return state: 'Authorized' here,
+                // and finalize in settlePayment().
+                //
+                // For demonstration, we'll do an immediate capture => 'Settled'
                 return {
                     amount,
                     state: 'Settled' as const,
-                    transactionId: result.transactionId,
+                    transactionId: pi.id, // store PaymentIntent ID
                     metadata: {
+                        ...metadata,
+                        clientSecret: pi.clientSecret,
                         transfer_group: order.code,
                     },
                 };
@@ -75,7 +101,20 @@ export const multivendorPaymentMethodHandler = new PaymentMethodHandler({
             }
         }
     },
-    settlePayment: async (ctx, order, payment, args) => {
+
+    /**
+     * settlePayment:
+     *  This is called if the Order process transitions from "PaymentAuthorized" state
+     *  to "PaymentSettled" state. If you returned 'Authorized' above, you'd do the capture here.
+     */
+    settlePayment: async (ctx, order, payment, args): Promise<SettlePaymentResult> => {
+        const stripeService = ctx.injector.get(StripeService);
+
+        // Example if you had an "authorized" PaymentIntent:
+        // await stripeService.capturePaymentIntent(payment.transactionId);
+
+        // Right now, we assume we've already captured
+        // in `createPayment` => just return success
         return { success: true };
     },
 });

@@ -16,4 +16,8 @@ export const shopApiExtensions = gql`
     extend type Mutation {
         registerNewSeller(input: RegisterSellerInput!): Channel
     }
+
+    extend type Mutation {
+    createStripePaymentIntent: String!
+}
 `;

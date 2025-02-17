@@ -23,6 +23,9 @@ import { MultivendorShippingLineAssignmentStrategy } from './config/mv-shipping-
 import { CONNECTED_PAYMENT_METHOD_CODE, MULTIVENDOR_PLUGIN_OPTIONS } from './constants';
 import { MultivendorService } from './service/mv.service';
 import { MultivendorPluginOptions } from './types';
+import { StripeController } from './payment/stripe/stripe.controller';
+import { StripeService } from './payment/stripe/stripe.service';
+import { rawBodyMiddleware } from './payment/stripe/raw-body.middleware';
 
 /**
  * @description
@@ -107,7 +110,7 @@ import { MultivendorPluginOptions } from './types';
  *
  * ```graphql
  * mutation {
- *   addPaymentToOrder(input: { method: "connected-payment-method", metadata: {} }) {
+ *   addPaymentToOrder(input: { method: "stripe-connect", metadata: {} }) {
  *     ... on Order { id }
  *     ... on ErrorResult {
  *       errorCode
@@ -125,6 +128,8 @@ import { MultivendorPluginOptions } from './types';
  */
 @VendurePlugin({
     imports: [PluginCommonModule],
+    controllers: [StripeController],
+    
     configuration: config => {
         config.customFields.Seller.push({
             name: 'connectedAccountId',
@@ -137,6 +142,23 @@ import { MultivendorPluginOptions } from './types';
         });
         config.paymentOptions.paymentMethodHandlers.push(multivendorPaymentMethodHandler);
 
+        config.apiOptions.middleware.push({
+            route: '/payments/stripe',
+            handler: rawBodyMiddleware,
+            beforeListen: true,
+        });
+
+        if (MultivendorPlugin.options.storeCustomersInStripe) {
+            config.customFields.Customer.push({
+                name: 'stripeCustomerId',
+                type: 'string',
+                label: [{ languageCode: LanguageCode.en, value: 'Stripe Customer ID' }],
+                nullable: true,
+                public: false,
+                readonly: true,
+            });
+        }
+        
         const customDefaultOrderProcess = configureDefaultOrderProcess({
             checkFulfillmentStates: false,
         });
@@ -157,8 +179,10 @@ import { MultivendorPluginOptions } from './types';
     },
     providers: [
         MultivendorService,
+        StripeService,
         { provide: MULTIVENDOR_PLUGIN_OPTIONS, useFactory: () => MultivendorPlugin.options },
     ],
+    compatibility: '^2.0.0',
 })
 export class MultivendorPlugin implements OnApplicationBootstrap {
     static options: MultivendorPluginOptions;
